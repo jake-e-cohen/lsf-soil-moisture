@@ -5,7 +5,7 @@ library(jsonlite)
 library(randomForest)
 library(tidyverse)
 
-setwd("/Users/jakecohen/Documents/LDEO Internship/Codes/")
+setwd("/Users/jakecohen/Desktop/Final Code Repository/")
 
 # Load data ====
 df <- readr::read_csv("/Users/jakecohen/Downloads/downscaling_data.csv")
