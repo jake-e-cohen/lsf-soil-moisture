@@ -1,0 +1,214 @@
+var grid = ee.Geometry.MultiPoint(
+        [[-73.91844638649391, 40.98680480999943],
+         [-73.90909084144997, 40.98648085815711],
+         [-73.90909084144997, 40.99438482877276],
+         [-73.91793140236305, 40.99503265320094],
+         [-73.90780892045925, 41.00313582899519],
+         [-73.91755695319667, 41.00437315068429]]),
+    s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED"),
+    modis = ee.ImageCollection("MODIS/061/MOD11A1"),
+    era5 = ee.ImageCollection("ECMWF/ERA5_LAND/DAILY_AGGR"),
+    region = ee.Geometry.Polygon(
+        [[[-73.92326948037221, 40.98487141166178],
+          [-73.90730497231557, 40.98500099575231],
+          [-73.90438672890737, 41.00715613047258],
+          [-73.91983625283315, 41.009876423112814]]]);
+
+// Define start and end dates
+var startYear = 2020;
+var endYear = 2024;
+var startMonth = 5;
+var endMonth = 8;
+
+// Process image collections
+var s2 = s2.filter(ee.Filter.calendarRange(startYear, endYear, "year"))
+          .filter(ee.Filter.calendarRange(startMonth, endMonth, "month"))
+          .filterBounds(region)
+          .map(maskS2Clouds)
+          .map(combineS2Bands)
+          .map(addDates)
+          .distinct("date");
+
+var modis = modis.filter(ee.Filter.calendarRange(startYear, endYear, "year"))
+              .filter(ee.Filter.calendarRange(startMonth, endMonth, "month"))
+              .filterBounds(region)
+              .map(maskMODIS_LST)
+              .map(getLST)
+              .map(addDates)
+              .distinct("date");
+              
+var era5 = era5.filter(ee.Filter.calendarRange(startYear, endYear, "year"))
+            .filter(ee.Filter.calendarRange(startMonth, endMonth, "month"))
+            .filterBounds(region)
+            .map(getTemp)
+            .map(addDates)
+            .distinct("date");
+
+// Remove images without valid pixels for region
+s2 = getNonNull(s2);
+modis = getNonNull(modis);
+
+// Filter image collections by aquisition date
+var s2Dates = ee.List(s2.aggregate_array("date"));
+var modisDates = ee.List(modis.aggregate_array("date"));
+var commonDates = s2Dates.filter(ee.Filter.inList("item", modisDates));
+
+// Join collections
+var simpleJoin = ee.Join.inner();
+var innerJoin = ee.ImageCollection(simpleJoin.apply(s2, modis, ee.Filter.equals({
+  leftField: "date",
+  rightField: "date"
+})));
+
+var joined = innerJoin.map(function(feature) {
+  return ee.Image.cat(feature.get("primary"), feature.get("secondary"));
+});
+
+var simpleJoin = ee.Join.inner();
+var innerJoin = ee.ImageCollection(simpleJoin.apply(joined, era5, ee.Filter.equals({
+  leftField: "date",
+  rightField: "date"
+})));
+
+var joined = innerJoin.map(function(feature) {
+  return ee.Image.cat(feature.get("primary"), feature.get("secondary"));
+});
+
+// Sample each image along the grid
+var sampled = joined.map(function(img) {
+  var date = img.get("date");
+  
+  var samples = img.sampleRegions({
+    collection: grid,
+    scale: 50,
+    geometries: true
+  }).map(function(feature) {
+    return feature.set("date", date);
+  });
+  
+  return samples;
+}).flatten();
+
+print(sampled);
+// Export
+Export.table.toDrive({
+  collection: sampled,
+  description: "downscaling_data",
+  fileFormat: "CSV",
+});
+
+// ================
+// Helper functions
+// ================
+// Masking
+function maskS2Clouds(img) {
+  var qa = img.select("QA60");
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+
+  return img.updateMask(mask)
+          .divide(10000)
+          .copyProperties(img, ["system:time_start", "system:time_end"]);
+}
+
+function maskMODIS_LST(img) {
+  var qc = img.select("QC_Day");
+  
+  // Select the first two bits
+  var qualityControlBitMask = qc.bitwiseAnd(3).lte(1);
+  
+  return img.updateMask(qualityControlBitMask).copyProperties(img);
+}
+
+function getNonNull(imgCollection) {
+  return imgCollection.map(function(img) {
+    // Cast to image
+    img = ee.Image(img);
+    
+    // Dynamically obtain first band name
+    var firstBand = ee.String(img.bandNames().get(0));
+    
+    // Count valid (unmasked) pixels in a known band, e.g., B8 for S2
+    var validPixels = img.mask().reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: region,
+      scale: 10,
+      maxPixels: 1e13
+    }).get(firstBand);
+
+    // Set as metadata
+    return img.set("valid_pixels", validPixels);
+  }).filter(ee.Filter.gt("valid_pixels", 0));
+}
+
+// Filtering by date
+function addDates(img) {
+  var date = ee.Date(img.get("system:time_start")).format("YYYY-MM-dd");
+  return img.set("date", date);
+}
+
+// Band computation
+function getLST(img) {
+  var lst = img.select("LST_Day_1km")
+              .multiply(0.02)
+              // Convert to ºC
+              .subtract(273.15)
+              .rename("LST");
+  return img.addBands(lst).select("LST");
+}
+
+function combineS2Bands(img) {
+  var evi = getEVI(img);
+  var ndmi = getNDMI(img);
+  var ndvi = getNDVI(img);
+  return img.select([
+    "B1",
+    "B2",
+    "B3",
+    "B4",
+    "B5",
+    "B6",
+    "B7",
+    "B8",
+    "B8A",
+    "B9",
+    "B11",
+    "B12"
+  ]).addBands([evi, ndmi, ndvi]);
+}
+
+function getEVI(img) {
+  var evi = img.expression(
+    "2.5 * ((NIR - R)/(NIR + 6 * R - 7.5 * B + 1))",
+    {
+      "NIR": img.select("B8"),
+      "R": img.select("B4"),
+      "B": img.select("B2")
+    }).rename("EVI");
+  return img.addBands(evi).select("EVI");
+}
+
+function getNDMI(img) {
+  var ndmi = img.normalizedDifference(["B8", "B11"])
+              .rename("NDMI");
+  return img.addBands(ndmi).select("NDMI");
+}
+
+function getNDVI(img) {
+  var ndvi = img.normalizedDifference(["B8", "B4"])
+              .rename("NDVI");
+  return img.addBands(ndvi).select("NDVI");
+}
+
+function getTemp(img) {
+  var temp = img.select("temperature_2m")
+              .subtract(273.15)
+              .rename("temp");
+  return img.addBands(temp).select("temp");
+}
