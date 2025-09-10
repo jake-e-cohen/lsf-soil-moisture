@@ -1,0 +1,420 @@
+var s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED"),
+    era5 = ee.ImageCollection("ECMWF/ERA5_LAND/HOURLY"),
+    soilgrid = ee.ImageCollection("projects/rangelands-explo-1571664594580/assets/Covariates/Soils/SoilGrid100"),
+    trees = ee.FeatureCollection("projects/ee-lamontforest/assets/tree_grids"),
+    region = ee.FeatureCollection("projects/ee-lamontforest/assets/final_roi_projected"),
+    grid = ee.FeatureCollection("projects/ee-lamontforest/assets/final_soil_grids");
+
+// =========================
+// Process Image Collections
+// =========================
+var scale = 10; // in meters
+var treeBufferDistance = 3; // in meters
+var samplingDay = ee.Date("2025-07-23");
+
+// Number of days up to and including the day of interest to capture
+var windowSize = 7;
+var startDate = samplingDay.advance(1 - windowSize, "day");
+var endDate = samplingDay.advance(1, "day");
+
+var s2 = s2.filterDate(startDate, endDate)
+          .filterBounds(region)
+          .map(maskS2Clouds)
+          .map(addDate)
+          .map(combineS2Bands);
+          
+var era5 = era5.filterDate(startDate, endDate)
+            .filterBounds(region)
+            .map(addDate);
+
+// Compile soil data for 5cm and 15cm depths
+// https://scholarsphere.psu.edu/resources/ea4b6c45-9eba-4b89-aba6-ff7246880fb1
+var bd_d2 = soilgrid.filter(ee.Filter.eq('system:index', 'bd_d2')).first().divide(1000).toDouble();
+var bd_d3 = soilgrid.filter(ee.Filter.eq('system:index', 'bd_d3')).first().divide(1000).toDouble();
+var soc_d2 = soilgrid.filter(ee.Filter.eq('system:index', 'soc_d2')).first().toDouble();
+var soc_d3 = soilgrid.filter(ee.Filter.eq('system:index', 'soc_d3')).first().toDouble();
+var clay_d2 = soilgrid.filter(ee.Filter.eq('system:index', 'clay_d2')).first().toDouble();
+var clay_d3 = soilgrid.filter(ee.Filter.eq('system:index', 'clay_d3')).first().toDouble();
+var sand_d2 = soilgrid.filter(ee.Filter.eq('system:index', 'sand_d2')).first().toDouble();
+var sand_d3 = soilgrid.filter(ee.Filter.eq('system:index', 'sand_d3')).first().toDouble();
+var soil = ee.Image(bd_d2).addBands(bd_d3)
+              .addBands(soc_d2).addBands(soc_d3)
+              .addBands(clay_d2).addBands(clay_d3)
+              .addBands(sand_d2).addBands(sand_d3)
+              .rename(['bd2','bd3','soc2','soc3','clay2','clay3','sand2','sand3']);
+
+
+// ====================
+// Assemble Final Image
+// ====================
+var s2_mean = s2.mean();
+var s2_stdDev = s2.reduce(ee.Reducer.stdDev());
+
+// Aggregate ERA5 hourly data to daily averages            
+era5 = reduceToDaily(era5);
+var era5_t7 = computeWindow(era5, 7, endDate),
+    era5_t5 = computeWindow(era5, 5, endDate),
+    era5_t3 = computeWindow(era5, 3, endDate),
+    era5_t1 = computeWindow(era5, 1, endDate);
+
+var finalImage = ee.Image.cat(
+  s2_mean, s2_stdDev, era5_t7, era5_t5, era5_t3, era5_t1, soil
+);
+
+// =====================
+// Add Tree Data to Grid
+// =====================
+trees = trees.filterMetadata("Code", "not_equals", 0);
+
+grid = grid.map(function(point) {
+  var buffer = point.buffer(treeBufferDistance);
+  var treesInBuffer = trees.filterBounds(buffer.geometry());
+  return point.set("trees", treesInBuffer.aggregate_array("Code"));
+});
+
+// ===============================
+// Sample the Grid and Export Data
+// ===============================
+/* 
+Final Units:
+- API (mm/day, but not meaningful)
+- Temperatures (ºC)
+- Dew Point (ºC)
+- Humidity (%)
+- Evapotranspiration (mm/day)
+- VPD (kPa)
+- Precipitation (mm/day)
+- Wind Speed (m/s)
+- S2REP (nm)
+- Other S2 indices and bands are unitless
+- BD (g/cm3)
+- SOC (g/kg)
+- Clay (%)
+- Sand (%)
+*/
+var sampled = grid.map(function(point) {
+  var stats = finalImage.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: point.geometry(),
+    scale: scale,
+    bestEffort: true
+  });
+  
+  return point.set(stats);
+});
+
+Export.table.toDrive({
+  collection: sampled,
+  description: samplingDay.format("YYYY-MM-dd").getInfo() + "_gee_data",
+  folder: "GEE",
+  fileFormat: "CSV"
+});
+
+// =================
+// Masking Functions
+// =================
+function maskS2Clouds(img) {
+  var qa = img.select("QA60");
+  
+  // Define bit masks
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  
+  // Update mask
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+              .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+              
+  return img.updateMask(mask)
+          .multiply(0.0001)
+          .copyProperties(img, ["system:time_start", "system:time_end"]);
+}
+
+// ========================
+// Date Filtering Functions
+// ========================
+function addDate(img) {
+  var date = ee.Date(img.get("system:time_start")).format("YYYY-MM-dd");
+  return img.set("date", date);
+}
+
+// Function to aggregate an image collection to daily averages
+function reduceToDaily(imgCollection) {
+  var dates = imgCollection.aggregate_array("date").distinct(); 
+  
+  var avgImgList = dates.map(function(date) {
+    var dailyImgs = imgCollection.filterMetadata("date", "equals", date);
+    return dailyImgs.mean()
+            .set("date", date)
+            .set("system:time_start", ee.Date(date).millis());
+  });
+
+  return ee.ImageCollection(avgImgList);
+}
+
+// =================
+// Band Computations
+// =================
+// ERA5
+// Compute mean of all bands over a window of nDays
+function computeWindow(imgCollection, nDays, endDate) {
+  // Filter image collection
+  imgCollection = imgCollection.filterDate(
+    endDate.advance(-nDays, "day"),
+    endDate
+  );
+  
+  // Compute bands
+  var api = getAPI(imgCollection, nDays);
+  var climate = imgCollection.map(combineERA5Bands)
+                .mean();
+  var climateWindow = ee.Image.cat(api, climate);
+  
+  return climateWindow.rename(climateWindow.bandNames().map(function(name) {
+    var suffix = ee.String("_t").cat(ee.Number(nDays));
+    return ee.String(name).cat(suffix);
+  }));
+}
+
+function combineERA5Bands(img) {
+  var dewPoint = getDewPoint(img);
+  var et = getEvapotranspiration(img);
+  var precipitation = getPrecipitation(img);
+  var relativeHumidity = getRelativeHumidity(img);
+  var temp = getTemp(img);
+  var vpd = getVPD(img);
+  var windSpeed = getWindSpeed(img);
+  return ee.Image.cat(
+    dewPoint,
+    et,
+    precipitation,
+    relativeHumidity,
+    temp,
+    vpd,
+    windSpeed
+  );
+}
+
+function getAPI(dailyImgCollection, nDays) {
+  var windowStart = ee.Date(dailyImgCollection.sort("date").first().get("date"));
+  
+  // Define parameters
+  var k_opt = 0.84;
+  var T_clt = 20;
+  var delta = 0.01; // sensitivity parameter
+  
+  var T_avg = dailyImgCollection.map(getTemp)
+                .select("tavg")
+                .mean()
+                .reduceRegion({
+                  reducer: ee.Reducer.mean(),
+                  geometry: region.geometry(),
+                  scale: scale,
+                  bestEffort: true
+                }).get("tavg");
+  
+  // Calculate k, the decay factor
+  // k = k_opt + delta * (T_clt - T_avg)
+  var k = ee.Number.expression(
+    "k_opt + delta * (T_clt - T_avg)",
+    {
+      "k_opt": k_opt,
+      "delta": delta,
+      "T_clt": T_clt,
+      "T_avg": ee.Number(T_avg)
+  });
+
+  // Calculate antecedent precipitation index using Σ(P_t) * k^(t)
+  var apiComponents = dailyImgCollection.map(function(img) {
+    var imgDate = ee.Date(img.get("date"));
+    var t = imgDate.difference(windowStart, "day");
+    return getPrecipitation(img)
+            .multiply(k.pow(t));
+  });
+
+  return apiComponents.sum().rename("api");
+}
+
+function getDewPoint(img) {
+  var dewPoint = img.select("dewpoint_temperature_2m")
+                  .rename("dew_point")
+                  .subtract(273.15);
+  return img.addBands(dewPoint).select("dew_point");
+}
+
+function getEvapotranspiration(img) {
+  // Estimated value for 20ºC
+  var latent_heat_vaporization = 2.45 * 1e6;
+  var latent_heat_flux = img.select("surface_latent_heat_flux")
+                          // Correct for downward flux being positive
+                          .multiply(-1);
+  // Resulting unit is kg/m^2/day which is the same as mm/day, the standard unit
+  var et = latent_heat_flux.divide(latent_heat_vaporization)
+            .rename("et");
+  return img.addBands(et).select("et");
+}
+
+function getRelativeHumidity(img) {
+  var relHumidity = img.expression(
+    "100 * exp((17.625 * Td) / (243.04 + Td)) / exp((17.625 * T) / (243.04 + T))",
+    {
+      "Td": getDewPoint(img),
+      "T": getTemp(img)
+    }).rename("relative_humidity");
+  return img.addBands(relHumidity).select("relative_humidity");
+}
+
+function getPrecipitation(img) {
+  var precipitation = img.select("total_precipitation")
+                        .rename("prcp")
+                        .multiply(1000);
+                      
+  return img.addBands(precipitation).select("prcp");
+}
+
+function getTemp(img) {
+  var airTemp = img.select("temperature_2m")
+                .rename("tavg")
+                .subtract(273.15);
+  return img.addBands(airTemp).select("tavg");
+}
+
+function getVPD(img) {
+  var vpd = img.expression(
+    "exp((17.625 * T) / (243.04 + T)) - exp((17.625 * Td) / (243.04 + Td))",
+    {
+      "Td": getDewPoint(img),
+      "T": getTemp(img)
+    }).rename("vpd");
+  return img.addBands(vpd).select("vpd");
+}
+
+function getWindSpeed(img) {
+  var windSpeed = img.expression(
+    "sqrt(pow(U, 2) + pow(V, 2))",
+    {
+      "U": img.select("u_component_of_wind_10m"),
+      "V": img.select("v_component_of_wind_10m")
+    }).rename("wind_speed");
+  return img.addBands(windSpeed).select("wind_speed");
+}
+
+// Sentinel-2
+function combineS2Bands(img) {
+  img = img.select("B.*");
+  var bi = getBI(img);
+  var evi = getEVI(img);
+  var gndvi = getGNDVI(img);
+  var ireci = getIRECI(img);
+  var mNDWI = getmNDWI(img);
+  var ndmi = getNDMI(img);
+  var ndvi = getNDVI(img);
+  var ndwi = getNDWI(img);
+  var s2rep = getS2REP(img);
+  var savi = getSAVI(img);
+  return img.addBands([bi, evi, gndvi, ireci, mNDWI, ndmi, ndvi, ndwi, s2rep, savi]);
+}
+
+function getBI(img) {
+  var bi = img.expression(
+    "sqrt((R * R) + (G * G)) / 2",
+    {
+      "R": img.select("B4"),
+      "G": img.select("B3")
+    }).rename("BI");
+  return img.addBands(bi).select("BI");
+}
+
+function getEVI(img) {
+  var evi = img.expression(
+    "2.5 * ((NIR - R)/(NIR + 6 * R - 7.5 * B + 1))",
+    {
+      "B": img.select("B2").clamp(0, 1),
+      "R": img.select("B4").clamp(0, 1),
+      "NIR": img.select("B8").clamp(0, 1)
+    }).rename("EVI");
+  return img.addBands(evi).select("EVI");
+}
+
+function getGNDVI(img) {
+  var gndvi = img.normalizedDifference(["B8", "B3"])
+                .rename("GNDVI");
+  return img.addBands(gndvi).select("GNDVI");
+}
+
+function getIRECI(img) {
+  var ireci = img.expression(
+    "(NIR - R) / (RE2 / RE1)",
+    {
+      "NIR": img.select("B8"),
+      "R": img.select("B4"),
+      "RE2": img.select("B6"),
+      "RE1": img.select("B5")
+    }).rename("IRECI");
+  return img.addBands(ireci).select("IRECI");
+}
+
+function getmNDWI(img) {
+  var mNDWI = img.normalizedDifference(["B3", "B11"])
+                .rename("mNDWI");
+  return img.addBands(mNDWI).select("mNDWI");
+}
+
+function getNDMI(img) {
+  var ndmi = img.normalizedDifference(["B8", "B11"])
+              .rename("NDMI");
+  return img.addBands(ndmi).select("NDMI");
+}
+
+function getNDVI(img) {
+  var ndvi = img.normalizedDifference(["B8", "B4"])
+              .rename("NDVI");
+  return img.addBands(ndvi).select("NDVI");
+}
+
+function getNDWI(img) {
+  var ndwi = img.normalizedDifference(["B3", "B8"])
+              .rename("NDWI");
+  return img.addBands(ndwi).select("NDWI");
+}
+
+function getS2REP(img) {
+  var s2rep = img.expression(
+    "705 + 35 * ((((NIR + R) / 2) - RE1) / (RE2 - RE1))",
+    {
+      "NIR": img.select("B8").clamp(0, 1),
+      "R": img.select("B4").clamp(0, 1),
+      "RE1": img.select("B5").clamp(0, 1),
+      "RE2": img.select("B6").clamp(0, 1)
+    }).rename("S2REP");
+  return img.addBands(s2rep).select("S2REP");
+}
+
+function getSAVI(img) {
+  var savi = img.expression(
+    "(1 + L) * ((NIR - R) / (NIR + R + L))",
+    {
+      "L": 0.5,
+      "NIR": img.select("B8"),
+      "R": img.select("B4")
+    }).rename("SAVI");
+  return img.addBands(savi).select("SAVI");
+}
+
+// Digital Elevation Model
+function assignBandNames(img) {
+  var bandNames = [
+    "aspect",
+    "plan_curvature",
+    "profile_curvature",
+    "tan_curvature",
+    "elevation",
+    "flow_path_length",
+    "roughness",
+    "hillshade",
+    "slope",
+    "tpi",
+    "twi"
+  ];
+  
+  return dem.rename(bandNames);
+}
