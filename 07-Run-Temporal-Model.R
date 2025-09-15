@@ -17,8 +17,8 @@ library(xgboost)
 
 # ==== Set-up ====
 set.seed(123)
-setwd("/Users/jakecohen/Desktop/Final Code Repository/")
-df <- read_csv("src/final_data.csv")
+setwd("working_directory") # Replace with working directory
+df <- read_csv("data_table") # Replace with path to full dataset
 
 # ==== 1. Remove Variables Concerning Location ====
 df <- df %>%
