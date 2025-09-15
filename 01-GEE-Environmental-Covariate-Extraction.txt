@@ -1,9 +1,9 @@
 var s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED"),
     era5 = ee.ImageCollection("ECMWF/ERA5_LAND/HOURLY"),
     soilgrid = ee.ImageCollection("projects/rangelands-explo-1571664594580/assets/Covariates/Soils/SoilGrid100"),
-    trees = ee.FeatureCollection("path_to_tree_dataset"),
-    region = ee.FeatureCollection("path_to_sampling_region"),
-    grid = ee.FeatureCollection("path_to_sampling_grid");
+    trees = ee.FeatureCollection("path_to_tree_dataset"), # Replace with actual path
+    region = ee.FeatureCollection("path_to_sampling_region"), # Replace with actual path
+    grid = ee.FeatureCollection("path_to_sampling_grid"); # Replace with actual path
 
 // =========================
 // Process Image Collections
