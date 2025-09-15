@@ -4,10 +4,10 @@ library(tidyverse)
 
 # ==== Set-up ====
 set.seed(123)
-setwd("/Users/jakecohen/Desktop/Final Code Repository/")
+setwd("working_directory") # Replace with working directory
 
 # ==== 1. Load Data ====
-df <- read_csv("src/final_data.csv")
+df <- read_csv("data_table") # Replace with full dataset
 
 # ==== 2. Investigate Soil Moisture Data ====
 ## ==== 2.1. Summary Statistics ====
