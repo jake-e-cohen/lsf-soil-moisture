@@ -5,10 +5,10 @@ library(jsonlite)
 library(randomForest)
 library(tidyverse)
 
-setwd("/Users/jakecohen/Desktop/Final Code Repository/")
+setwd("working_directory") # Replace with actual directory
 
 # Load data ====
-df <- readr::read_csv("/Users/jakecohen/Downloads/downscaling_data.csv")
+df <- readr::read_csv("data_file") # Replace with path to CSV containing MODIS LST values and covariates
 
 # Create derived index for date
 sin.doy <- sin(yday(df$date) * 2 * pi / 365)
