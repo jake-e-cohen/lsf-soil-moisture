@@ -3,15 +3,15 @@ library(jsonlite)
 library(tidyverse)
 
 # ==== Set-up ====
-setwd("/Users/jakecohen/Desktop/Final Code Repository/")
+setwd("working_directory") # Replace with actual working directory
 
 # ==== 1. Import Data ====
-sm <- read_csv("src/soil_moisture.csv")
-trees <- read_csv("src/trees.csv")
-topography <- read_csv("src/topography.csv")
+sm <- read_csv("soil_moisture") # Replace with path to soil moisture data
+trees <- read_csv("trees") # Replace with path to tree data
+topography <- read_csv("topography") # Replace with path to topographical data
 
 # Import LST downscaling regression model
-lst.model <- load("src/LST_downscaling_model.RData") %>% get()
+lst.model <- load("LST_model") %>% get() # Replace with path to LST downscaling model
 
 ## ==== 1.1. Combine GEE Data ====
 dates <- c("2025-06-05", "2025-06-11", "2025-06-20", "2025-06-26", "2025-07-03",
