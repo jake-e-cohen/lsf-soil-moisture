@@ -1,9 +1,9 @@
 var s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED"),
     era5 = ee.ImageCollection("ECMWF/ERA5_LAND/HOURLY"),
     soilgrid = ee.ImageCollection("projects/rangelands-explo-1571664594580/assets/Covariates/Soils/SoilGrid100"),
-    trees = ee.FeatureCollection("projects/ee-lamontforest/assets/tree_grids"),
-    region = ee.FeatureCollection("projects/ee-lamontforest/assets/final_roi_projected"),
-    grid = ee.FeatureCollection("projects/ee-lamontforest/assets/final_soil_grids");
+    trees = ee.FeatureCollection("path_to_tree_dataset"),
+    region = ee.FeatureCollection("path_to_sampling_region"),
+    grid = ee.FeatureCollection("path_to_sampling_grid");
 
 // =========================
 // Process Image Collections
